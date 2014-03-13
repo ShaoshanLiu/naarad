@@ -8,6 +8,7 @@ Unless required by applicable law or agreed to in writing, software distribute
 from naarad.graphing import matplotlib_naarad
 from naarad.graphing import pygal_naarad
 from naarad.metrics.linkedin_android_rum_metric import LinkedInAndroidRumMetric
+from naarad.metrics.linkedin_mobile_web_metric import LinkedInMobileWebMetric
 from naarad.metrics.jmeter_metric import JmeterMetric
 from naarad.metrics.procvmstat_metric import ProcVmstatMetric
 from naarad.metrics.procmeminfo_metric import ProcMeminfoMetric
@@ -20,6 +21,7 @@ metric_classes = {
     #'MyMetric' : MyMetricParserClass
     'JMETER' : JmeterMetric,
     'LINKEDINANDROIDRUM' : LinkedInAndroidRumMetric, 
+    'LINKEDINMOBWEB' : LinkedInMobileWebMetric,
     'PROCVMSTAT' : ProcVmstatMetric,
     'PROCMEMINFO' : ProcMeminfoMetric, 
     'PROCZONEINFO' : ProcZoneinfoMetric
@@ -42,6 +44,7 @@ reporting_modules = {
 important_sub_metrics_import = {
     'GC': ('GCPause', 'used'),
     'LINKEDINANDROIDRUM': ('launch_time', 'nus_update_time'),
+    'LINKEDINMOBWEB': ('all_PageViews', 'all_Actions'),
     'SAR-cpuusage': ('%sys', '%usr'),
     'SAR-device': ('%util', 'await'),
     'JMETER': ('Overall_Summary.ResponseTime', 'Overall_Summary.DataThroughput', 'Overall_Summary.qps')
