@@ -34,14 +34,15 @@ from naarad.reporting.diff import Diff, NaaradReport
 from naarad.run_steps.run_step import Run_Step
 from naarad.run_steps.local_cmd import Local_Cmd
 import naarad.naarad_constants as CONSTANTS
-import time
 
 try:
   from naarad.naarad_imports import metric_classes, aggregate_metric_classes, graphing_modules, device_type_metrics
 except ImportError:
   metric_classes = {}
   graphing_modules = {}
-  aggregate_metric_classes = {} 
+  aggregate_metric_classes = {}
+  device_type_metrics = {}
+
 #Naarad pre-defined
 metric_classes['GC'] = GCMetric
 metric_classes['SAR'] = SARMetric
@@ -112,7 +113,7 @@ def read_naarad_templates():
         logger.info('Adding template ' + template) 
         template_urls[template] = url
 
-def parse_and_plot_single_metrics(metric, graph_timezone, outdir_default, indir_default, graphing_library, graph_lock):
+def parse_and_plot_single_metrics(metric, graph_timezone, outdir_default, indir_default, graphing_library, graph_lock, skip_plots):
   metric.graph_timezone = graph_timezone
   if metric.outdir is None:
     metric.outdir = os.path.normpath(outdir_default)
@@ -126,12 +127,13 @@ def parse_and_plot_single_metrics(metric, graph_timezone, outdir_default, indir_
     if metric.collect():
       if metric.parse():
         metric.calc()
-        metric.calculate_stats() 
+        metric.calculate_stats()
         global sla_failures
         sla_failures = sla_failures + naarad.utils.check_slas(metric)
-        graph_lock.acquire()
-        metric.graph(graphing_library)
-        graph_lock.release()
+        if not skip_plots:
+          graph_lock.acquire()
+          metric.graph(graphing_library)
+          graph_lock.release()
       else:
         logger.error('Parsing failed for metric: '  + metric.label)
     else:
@@ -171,12 +173,17 @@ def main():
   metrics = []
   aggregate_metrics = [] 
   crossplots = []
-  run_steps = []
+  pre_run_steps = []
+  in_run_steps = []
+  post_run_steps = []
+  workload_run_steps = []
   graph_timezone = None
   graphing_library = 'matplotlib'
   variables_dict = {}
+  ts_start = None
+  ts_end = None
   bin_path = os.path.dirname( __file__ )
-
+  skip_plots = False
   arg_parser = argparse.ArgumentParser()
   arg_parser.add_argument('-c', '--config', help="file with specifications for each metric and graphs")
   arg_parser.add_argument('-i', '--input_dir', help="input directory used to construct full path name of the metric infile")
@@ -186,6 +193,7 @@ def main():
   arg_parser.add_argument('-s', '--show_config', help="Print config associated with the provided template name", action="store_true")
   arg_parser.add_argument('-l', '--log', help="log level")
   arg_parser.add_argument('-d', '--diff', nargs=2, help="Specify the location of two naarad reports to diff separated by a space. Can be local or http(s) locations. The first report is used as a baseline.", metavar=("report-1", "report-2"))
+  arg_parser.add_argument('-n', '--no_plots', help="Don't generate plot images. Useful when you only want SLA calculations. Note that on-demand charts can still be generated through client-charting.", action="store_true")
   arg_parser.add_argument('-e', '--exit_code', help="optional argument to enable exit_code for naarad", action="store_true")
   #TODO(Ritesh) : Print a list of all templates supported with descriptions
   #arg_parser.add_argument('-l', '--list_templates', help="List all template configs", action="store_true")
@@ -195,6 +203,8 @@ def main():
   init_logging(args.log)
 
   if args:
+    if args.no_plots:
+      skip_plots = True
     if args.diff:
       if not args.output_dir:
         logger.error('No Output location specified')
@@ -241,7 +251,19 @@ def main():
         graphing_library, crossplots, outdir_default, indir_default, graph_timezone = \
           naarad.utils.parse_graph_section(config_obj, section, outdir_default, indir_default)
       elif section.startswith('RUN-STEP'):
-        run_steps.append(naarad.utils.parse_run_step_section(config_obj, section))
+        run_step = naarad.utils.parse_run_step_section(config_obj, section)
+        if not run_step:
+          logger.error('Ignoring section %s, could not parse it correctly', section)
+          continue
+        if run_step.run_order == CONSTANTS.PRE_ANALYSIS_RUN:
+          pre_run_steps.append(run_step)
+        # DURING_ANALYSIS_RUN not supported yet
+        elif run_step.run_order == CONSTANTS.DURING_ANALYSIS_RUN:
+          in_run_steps.append(run_step)
+        elif run_step.run_order == CONSTANTS.POST_ANALYSIS_RUN:
+          post_run_steps.append(run_step)
+        else:
+          logger.error('Unknown RUN-STEP run_order specified')
       else:
         # section name is used to create sub-directories, so enforce it. 
         if not naarad.utils.is_valid_metric_name(section):
@@ -278,24 +300,29 @@ def main():
       except OSError as exception:
         if exception.errno != errno.EEXIST:
           raise
-      logger.info('Report.html and the plots will be in ' + outdir_default)
+      logger.info('Reports and the plots will be in ' + outdir_default)
     else:
       sys.exit("No output directory defined. Please use option -o, or update the config. Exiting...")
 
     if graph_timezone:
       logger.info('X-axis will be displayed in timezone: %s', graph_timezone)
-    threads = []
-    #TODO: Implement ordering of run_steps
-    for run_step in run_steps:
+
+    for run_step in sorted(pre_run_steps, key=lambda step: step.run_rank):
       run_step.run()
-    ts_start, ts_end = naarad.utils.get_run_time_period(run_steps)
+      if run_step.run_type == CONSTANTS.RUN_TYPE_WORKLOAD:
+        workload_run_steps.append(run_step)
+    # Get analysis time period from workload run steps
+    if len(workload_run_steps) > 0:
+      ts_start, ts_end = naarad.utils.get_run_time_period(workload_run_steps)
+
+    threads = []
     graph_lock = threading.Lock()
     for metric in metrics:
-      if ts_start:
+      if ts_start and not metric.ts_start:
         metric.ts_start = ts_start
-      if ts_end:
+      if ts_end and not metric.ts_start:
         metric.ts_end = ts_end
-      thread = threading.Thread(target=parse_and_plot_single_metrics, args=(metric, graph_timezone, outdir_default, indir_default, graphing_library, graph_lock))
+      thread = threading.Thread(target=parse_and_plot_single_metrics, args=(metric, graph_timezone, outdir_default, indir_default, graphing_library, graph_lock, skip_plots))
       thread.start()
       threads.append(thread)
     for t in threads:
@@ -303,7 +330,7 @@ def main():
       
     # handling CLUSTER metric and other aggregate metrics, which has to wait for all regular metric threads to complete.   
     for metric in aggregate_metrics:
-      thread = threading.Thread(target=parse_and_plot_single_metrics, args=(metric, graph_timezone, outdir_default, indir_default, graphing_library, graph_lock))
+      thread = threading.Thread(target=parse_and_plot_single_metrics, args=(metric, graph_timezone, outdir_default, indir_default, graphing_library, graph_lock, skip_plots))
       thread.start()
       threads.append(thread)
     for t in threads:
@@ -315,6 +342,9 @@ def main():
       correlated_plots = []      
     rpt = Report(None, outdir_default, resource_directory, resource_path, metrics + aggregate_metrics, correlated_plots=correlated_plots)
     rpt.generate()
+
+    for run_step in sorted(post_run_steps, key=lambda step: step.run_rank):
+      run_step.run()
 
   global sla_failures  
   if args.exit_code:

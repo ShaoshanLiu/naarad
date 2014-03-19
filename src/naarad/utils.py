@@ -23,6 +23,7 @@ from naarad.metrics.metric import Metric
 from naarad.graphing.plot_data import PlotData
 from naarad.run_steps.run_step import Run_Step
 from naarad.run_steps.local_cmd import Local_Cmd
+import naarad.naarad_constants as CONSTANTS
 
 logger = logging.getLogger('naarad.utils')
 
@@ -214,16 +215,38 @@ def parse_run_step_section(config_obj, section):
   :param section: Section name
   :return: an initialized Run_Step object
   """
-  run_type = config_obj.get(section, 'run_type')
-  run_cmd = config_obj.get(section, 'run_cmd')
+  kill_after_seconds = None
+  try:
+    run_cmd = config_obj.get(section, 'run_cmd')
+    run_rank = int(config_obj.get(section, 'run_rank'))
+  except ConfigParser.NoOptionError:
+    logger.exception("Exiting.... some mandatory options are missing from the config file in section: " + section)
+    sys.exit()
+  except ValueError:
+    logger.error("Bad run_rank %s specified in section %s, should be integer. Exiting.", config_obj.get(section, 'run_rank'), section)
+    sys.exit()
+  if config_obj.has_option(section, 'run_type'):
+    run_type = config_obj.get(section, 'run_type')
+  else:
+    run_type = CONSTANTS.RUN_TYPE_WORKLOAD
+  if config_obj.has_option(section, 'run_order'):
+    run_order = config_obj.get(section, 'run_order')
+  else:
+    run_order = CONSTANTS.PRE_ANALYSIS_RUN
   if config_obj.has_option(section, 'call_type'):
     call_type = config_obj.get(section, 'call_type')
   else:
     call_type = 'local'
+  if config_obj.has_option(section, 'kill_after_seconds'):
+    try:
+      kill_after_seconds = int(config_obj.get(section, 'kill_after_seconds'))
+    except ValueError:
+      logger.error("Bad kill_after_seconds %s specified in section %s, should be integer.", config_obj.get(section, 'kill_after_seconds'), section)
+
   if call_type == 'local':
-    run_step_obj = Local_Cmd(run_type, run_cmd, call_type)
+    run_step_obj = Local_Cmd(run_type, run_cmd, call_type, run_order, run_rank, kill_after_seconds=kill_after_seconds)
   else:
-    logger.warning('Unsupported RUN_STEP supplied, call_type should be local')
+    logger.error('Unsupported RUN_STEP supplied, call_type should be local')
     run_step_obj = None
   return run_step_obj
 
@@ -582,33 +605,35 @@ def set_sla(obj, sub_metric, rules):
       obj.sla_list.append(sla)  # TODO : remove this once report has grading done in the metric tables
   return True
 
-def check_slas(obj):
+def check_slas(metric):
   """
   Check if all SLAs pass
   :return: 0 (if all SLAs pass) or the number of SLAs failures
   """
-  if not hasattr(obj, 'sla_map'):
+  if not hasattr(metric, 'sla_map'):
     return 0
   ret = 0
-  for sub_metric in obj.sla_map.keys():
-    for stat_name in obj.sla_map[sub_metric].keys():
-      sla = obj.sla_map[sub_metric][stat_name]
-      if stat_name[0] == 'p' and hasattr(obj, 'calculated_percentiles'):
-        if sub_metric in obj.calculated_percentiles.keys():
+  for sub_metric in metric.sla_map.keys():
+    for stat_name in metric.sla_map[sub_metric].keys():
+      sla = metric.sla_map[sub_metric][stat_name]
+      if stat_name[0] == 'p' and hasattr(metric, 'calculated_percentiles'):
+        if sub_metric in metric.calculated_percentiles.keys():
           percentile_num = int(stat_name[1:])
           if isinstance(percentile_num, float) or isinstance(percentile_num, int):
-            if percentile_num in obj.calculated_percentiles[sub_metric].keys():
-              if not sla.check_sla_passed(obj.calculated_percentiles[sub_metric][percentile_num]):
-                ret = ret + 1
-      if sub_metric in obj.calculated_stats.keys() and hasattr(obj, 'calculated_stats'):
-        if stat_name in obj.calculated_stats[sub_metric].keys():
-          if not sla.check_sla_passed(obj.calculated_stats[sub_metric][stat_name]):
-            ret = ret + 1
+            if percentile_num in metric.calculated_percentiles[sub_metric].keys():
+              if not sla.check_sla_passed(metric.calculated_percentiles[sub_metric][percentile_num]):
+                ret += 1
+                metric.status = CONSTANTS.SLA_FAILED
+      if sub_metric in metric.calculated_stats.keys() and hasattr(metric, 'calculated_stats'):
+        if stat_name in metric.calculated_stats[sub_metric].keys():
+          if not sla.check_sla_passed(metric.calculated_stats[sub_metric][stat_name]):
+            ret += 1
+            metric.status = CONSTANTS.SLA_FAILED
   # Save SLA results in a file
-  if len(obj.sla_map.keys()) > 0 and hasattr(obj, 'get_sla_csv'):
-    sla_csv_file = obj.get_sla_csv()
+  if len(metric.sla_map.keys()) > 0 and hasattr(metric, 'get_sla_csv'):
+    sla_csv_file = metric.get_sla_csv()
     with open(sla_csv_file, 'w') as FH:
-      for sub_metric in obj.sla_map.keys():
-        for stat, sla in obj.sla_map[sub_metric].items():
+      for sub_metric in metric.sla_map.keys():
+        for stat, sla in metric.sla_map[sub_metric].items():
           FH.write('%s\n' % (sla.get_csv_repr()))
   return ret
